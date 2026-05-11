@@ -11,7 +11,6 @@ DEFAULT_SCENARIO = {
     "bandwidth_limit": None,
 }
 
-
 def run_simulation(
     protocol_func,
     num_nodes,

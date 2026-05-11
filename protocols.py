@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import random
 from typing import Callable
 
@@ -34,6 +33,28 @@ def _choose_peer(network, node):
             peer = random.choice(network.nodes)
     return peer
 
+def _reliability_state(network, key="reliability_aware_push"):
+    if key not in network.protocol_state:
+        network.protocol_state[key] = {
+            "peer_scores": {
+                node.node_id: {
+                    peer.node_id: 0.5
+                    for peer in network.nodes
+                    if peer.node_id != node.node_id
+                }
+                for node in network.nodes
+            }
+        }
+    return network.protocol_state[key]
+
+
+def _choose_best_peers(network, node, peer_scores, count):
+    candidates = [peer for peer in network.nodes if peer.node_id != node.node_id]
+    candidates.sort(
+        key=lambda peer: (peer_scores[node.node_id][peer.node_id], random.random()),
+        reverse=True,
+    )
+    return candidates[:count]
 
 def _sample_delay_rounds(latency_mean=0.0, latency_jitter=0.0):
     if latency_mean <= 0 and latency_jitter <= 0:
@@ -148,6 +169,102 @@ def push_round(
 
     return _finalize_round(metrics, network, newly_informed_now, fanout, 1, delayed_from_queue)
 
+def reliability_aware_push_round(
+    network,
+    fanout=1,
+    packet_loss=0.0,
+    latency_mean=0.0,
+    latency_jitter=0.0,
+    bandwidth_limit=None,
+    delayed_from_queue=0,
+    learning_rate=0.20,
+    explore_ratio=0.10,
+    suppression_threshold=0.80,
+    suppression_probability=0.75,
+):
+    state = _reliability_state(network)
+    peer_scores = state["peer_scores"]
+
+    newly_informed_now = set()
+    metrics = _empty_metrics(
+        fanout_used=fanout,
+        interval_used=1,
+        delayed_from_queue=delayed_from_queue,
+    )
+    metrics["idle_round"] = False
+    used_bandwidth = 0
+
+    informed_ratio = network.informed_ratio()
+
+    for node in network.nodes:
+        if not node.has_message:
+            continue
+        if informed_ratio >= suppression_threshold and random.random() < suppression_probability:
+            continue
+
+        scored_count = max(1, int(round(fanout * (1.0 - explore_ratio))))
+        random_count = max(0, fanout - scored_count)
+
+        chosen_peers = []
+        chosen_ids = set()
+
+        for peer in _choose_best_peers(network, node, peer_scores, scored_count):
+            if peer.node_id not in chosen_ids:
+                chosen_peers.append(peer)
+                chosen_ids.add(peer.node_id)
+
+        available_random = [
+            peer for peer in network.nodes
+            if peer.node_id != node.node_id and peer.node_id not in chosen_ids
+        ]
+
+        if available_random and random_count > 0:
+            extra = random.sample(
+                available_random,
+                k=min(random_count, len(available_random))
+            )
+            for peer in extra:
+                chosen_peers.append(peer)
+                chosen_ids.add(peer.node_id)
+
+        for peer in chosen_peers:
+            already_had_message = (
+                peer.has_message
+                or peer.node_id in newly_informed_now
+                or network.is_pending_for(peer.node_id)
+            )
+
+            attempt = _attempt_send(
+                sender=node,
+                receiver=peer,
+                network=network,
+                packet_loss=packet_loss,
+                latency_mean=latency_mean,
+                latency_jitter=latency_jitter,
+                bandwidth_limit=bandwidth_limit,
+                used_bandwidth=used_bandwidth,
+                newly_informed_now=newly_informed_now,
+            )
+            used_bandwidth += attempt["bandwidth_used"]
+
+            for key, value in attempt.items():
+                metrics[key] += value
+
+            score = peer_scores[node.node_id][peer.node_id]
+            delivered = attempt["successful_deliveries"] > 0
+            useful = delivered and not already_had_message
+
+            if useful:
+                score = min(1.0, score + learning_rate)
+            elif delivered:
+                score = max(0.0, score - learning_rate)
+            else:
+                score = max(0.0, score - learning_rate * 1.25)
+
+            peer_scores[node.node_id][peer.node_id] = score
+
+    return _finalize_round(metrics, network, newly_informed_now, fanout, 1, delayed_from_queue)
+
 
 def push_pull_round(
     network,
@@ -170,9 +287,7 @@ def push_pull_round(
             if not node.has_message and not peer.has_message:
                 continue
 
-            # Count push-pull as two message exchanges worth of overhead.
-            metrics["messages_sent"] += 1  # second direction; first comes from _attempt_send
-
+            metrics["messages_sent"] += 1  
             if node.has_message and not peer.has_message:
                 receiver = peer
             elif peer.has_message and not node.has_message:
@@ -181,7 +296,6 @@ def push_pull_round(
                 receiver = None
 
             if receiver is None:
-                # Both sides already know the rumor.
                 if bandwidth_limit is not None and used_bandwidth >= bandwidth_limit:
                     metrics["dropped_messages"] += 2
                     metrics["congestion_drops"] += 2
@@ -209,7 +323,6 @@ def push_pull_round(
             for key, value in attempt.items():
                 metrics[key] += value
 
-            # Add overhead for the response direction whenever bandwidth allows.
             if bandwidth_limit is not None and used_bandwidth >= bandwidth_limit:
                 metrics["dropped_messages"] += 1
                 metrics["congestion_drops"] += 1

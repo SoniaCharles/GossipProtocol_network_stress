@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+#  Controlls all experiments. 
 from math import log2
 from pathlib import Path
 from statistics import mean, variance
@@ -12,24 +12,21 @@ from protocols import (
     push_pull_round,
     adaptive_push_round,
     adaptive_push_pull_round,
+    reliability_aware_push_round,
 )
-
-
 SCENARIO_ORDER = [
     "Baseline",
     "Packet Loss",
     "Latency Variation",
     "Combined Stress",
 ]
-
 PROTOCOL_ORDER = [
     "Push",
     "Push-Pull",
     "Adaptive Push",
     "Adaptive Push-Pull",
+    "Reliability-Aware Push",
 ]
-
-
 METRICS = {
     "convergence_success_rate": "Success Rate",
     "avg_rounds": "Convergence Time",
@@ -45,12 +42,8 @@ METRICS = {
 def _safe_mean(values):
     return mean(values) if values else None
 
-
-
 def _safe_variance(values):
     return variance(values) if len(values) >= 2 else 0.0 if len(values) == 1 else None
-
-
 
 def run_trials(protocol_name, protocol_func, num_nodes, scenario_name, scenario, trials=10, base_seed=0, **kwargs):
     results = []
@@ -116,6 +109,7 @@ def run_all_experiments(trials=10):
         ("Push-Pull", push_pull_round, {"fanout": 1}),
         ("Adaptive Push", adaptive_push_round, {"base_fanout": 1}),
         ("Adaptive Push-Pull", adaptive_push_pull_round, {"base_fanout": 1}),
+        ("Reliability-Aware Push", reliability_aware_push_round, {"fanout": 1}),
     ]
 
     scenarios = {
@@ -217,22 +211,48 @@ def print_results_table(results):
 
 
 def print_summary(results):
-    print("\nTop configurations by scenario (highest success, then lowest rounds):")
+    print("\nBest configurations by scenario and metric:")
+
+    metric_preferences = [
+        ("avg_rounds", "Convergence Time", "min"),
+        ("avg_messages", "Message Overhead", "min"),
+        ("avg_redundancy_factor", "Redundancy Factor", "min"),
+        ("avg_bandwidth_utilization", "Bandwidth Utilization", "min"),
+        ("convergence_success_rate", "Success Rate", "max"),
+    ]
+
     for scenario in SCENARIO_ORDER:
         subset = [r for r in results if r["scenario"] == scenario]
         if not subset:
             continue
-        best = sorted(
-            subset,
-            key=lambda r: (-r["convergence_success_rate"], r["avg_rounds"] if r["avg_rounds"] is not None else float("inf")),
-        )[0]
-        avg_rounds = f"{best['avg_rounds']:.2f}" if best["avg_rounds"] is not None else "N/A"
+
+        print(f"\n{scenario}:")
+        for metric_key, metric_label, direction in metric_preferences:
+            valid = [r for r in subset if r[metric_key] is not None]
+            if not valid:
+                continue
+
+            if direction == "min":
+                best = min(valid, key=lambda r: r[metric_key])
+            else:
+                best = max(valid, key=lambda r: r[metric_key])
+
+            print(
+                f"- {metric_label}: {best['protocol']} @ {best['num_nodes']} nodes "
+                f"({best[metric_key]:.2f})"
+            )
+
+def print_combined_stress_bandwidth_winners(results):
+    print("\nCombined Stress bandwidth winners by network size:")
+    subset = [r for r in results if r["scenario"] == "Combined Stress"]
+
+    for num_nodes in sorted({r["num_nodes"] for r in subset}):
+        candidates = [r for r in subset if r["num_nodes"] == num_nodes]
+        best = min(candidates, key=lambda r: r["avg_bandwidth_utilization"])
         print(
-            f"- {scenario}: {best['protocol']} @ {best['num_nodes']} nodes "
-            f"(success={best['convergence_success_rate']:.2f}, avg_rounds={avg_rounds})"
+            f"- {num_nodes} nodes: {best['protocol']} "
+            f"({best['avg_bandwidth_utilization']:.2f})"
         )
-
-
 
 def save_metric_plots(results, output_dir="plots"):
     output_path = Path(output_dir)

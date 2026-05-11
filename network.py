@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from collections import deque
 from node import Node
 
@@ -14,7 +13,7 @@ class Network:
         self.pending_deliveries: list[tuple[int, int]] = []
         self.recent_stats = deque(maxlen=5)
         self.protocol_state: dict[str, dict] = {}
-        self.nodes[0].has_message = True  # source node starts informed
+        self.nodes[0].has_message = True  
 
     def reset(self):
         for node in self.nodes:
@@ -26,10 +25,6 @@ class Network:
         self.nodes[0].has_message = True
 
     def start_round(self) -> int:
-        """
-        Advance the simulation by one round and deliver any messages whose
-        latency has expired.
-        """
         self.round_number += 1
         delivered_now = 0
         remaining = []
